@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Device Type Detector</title>
+  <title>Device Type Detector — Port Signals Only</title>
   <style>
     body { font-family: Arial, sans-serif; padding: 24px; line-height: 1.5; max-width: 900px; margin: 0 auto; }
     button { padding: 10px 14px; margin-bottom: 14px; cursor: pointer; }
@@ -20,17 +20,23 @@
     table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 10px; }
     td, th { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
     th { background: #f6f8fa; }
+    .caveat { font-size: 13px; color: #b26a00; background: #fff8e6; border: 1px solid #f3d98a; border-radius: 8px; padding: 10px 14px; margin: 10px 0; }
   </style>
 </head>
 <body>
-  <h1>Device Type Detector (Smartphone vs Laptop/Desktop)</h1>
+  <h1>Device Type Detector — Port / External-Device Signals Only</h1>
   <p style="font-size:13px;color:#555;">
-    No single signal proves device type — a phone can fake desktop mode and a desktop
-    browser can spoof its user agent. This combines several independent signals
-    (touch hardware, pointer precision, motion sensors, screen profile, and the
-    fact that iOS ships zero WebUSB support while Android/desktop Chrome do) and
-    scores them together for a confidence-rated verdict instead of a single guess.
+    Uses only external-device and port-related browser APIs: WebUSB, WebHID, Web Serial,
+    already-paired USB peripheral classes, and external-monitor detection. No user-agent,
+    touch, motion, or screen-size checks.
   </p>
+  <div class="caveat">
+    <strong>Asymmetry to know:</strong> WebHID and Web Serial are desktop-Chrome-only APIs
+    (never on Android Chrome or iOS), so their presence is a strong desktop tell. But there's
+    no port API that's phone-exclusive — Android Chrome and desktop Chrome both expose WebUSB.
+    So this detector can confidently say "desktop" but can only say "uncertain," not a confident
+    "phone," when desktop-only APIs are missing.
+  </div>
   <button id="detectBtn">Detect device type</button>
   <div id="verdictBox"></div>
   <div id="bars"></div>
@@ -41,85 +47,111 @@
       return typeof navigator !== "undefined" && typeof navigator.usb !== "undefined";
     }
 
-    function signalUserAgent() {
-      if (navigator.userAgentData && typeof navigator.userAgentData.mobile === "boolean") {
-        return {
-          name: "User-Agent Data API",
-          source: "navigator.userAgentData.mobile",
-          weight: 40,
-          mobile: navigator.userAgentData.mobile,
-          detail: `mobile=${navigator.userAgentData.mobile}, platform=${navigator.userAgentData.platform}`
-        };
+    async function getPairedUsbDevices() {
+      if (!checkUsbApiPresent()) return [];
+      try {
+        return await navigator.usb.getDevices();
+      } catch (e) {
+        return [];
       }
-      const ua = navigator.userAgent || "";
-      const mobileRe = /Android|iPhone|iPod|Mobile|Windows Phone/i;
-      const tabletRe = /iPad|Tablet/i;
-      const desktopRe = /Windows NT|Macintosh|X11; Linux/i;
-      let mobile = null;
-      let detail = "no clear match";
-      if (mobileRe.test(ua) && !tabletRe.test(ua)) { mobile = true; detail = "UA matches phone pattern"; }
-      else if (desktopRe.test(ua)) { mobile = false; detail = "UA matches desktop OS pattern"; }
-      return { name: "User-Agent string", source: "navigator.userAgent", weight: 25, mobile, detail };
     }
 
-    function signalTouchPoints() {
-      const points = navigator.maxTouchPoints || 0;
-      const mobile = points >= 1;
-      return { name: "Touch points", source: "navigator.maxTouchPoints", weight: 15, mobile, detail: `maxTouchPoints=${points}` };
-    }
-
-    function signalPointerType() {
-      const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
-      const anyFine = window.matchMedia && window.matchMedia("(any-pointer: fine)").matches;
-      let mobile = null;
-      let detail;
-      if (coarse && !anyFine) { mobile = true; detail = "primary pointer coarse, no fine pointer available (no mouse)"; }
-      else if (anyFine) { mobile = false; detail = "fine pointer available (mouse/trackpad present)"; }
-      else { detail = "ambiguous pointer profile"; }
-      return { name: "Pointer precision", source: "matchMedia(pointer)", weight: 10, mobile, detail };
-    }
-
-    function signalMotionSensors() {
-      const has = typeof DeviceOrientationEvent !== "undefined" && typeof DeviceMotionEvent !== "undefined";
+    function signalWebHID() {
+      const supported = typeof navigator !== "undefined" && "hid" in navigator;
       return {
-        name: "Motion sensors",
-        source: "DeviceOrientationEvent / DeviceMotionEvent",
-        weight: has ? 10 : 5,
-        mobile: has,
-        detail: has ? "accelerometer/gyroscope events supported (typical of handheld hardware)" : "not supported (typical of non-handheld hardware)"
+        name: "WebHID API",
+        source: "navigator.hid",
+        weight: 25,
+        mobile: supported ? false : null,
+        detail: supported
+          ? "navigator.hid present → desktop-only API (Chrome/Edge/Opera desktop; never Android Chrome or iOS)"
+          : "navigator.hid absent → inconclusive (could be mobile, or Firefox/Safari desktop, which also lack it)"
       };
     }
 
-    function signalScreenProfile() {
-      const shortSide = Math.min(window.screen.width, window.screen.height);
-      let mobile = null;
-      let detail;
-      if (shortSide <= 500) { mobile = true; detail = `short screen side ${shortSide}px (phone-sized)`; }
-      else if (shortSide >= 900) { mobile = false; detail = `short screen side ${shortSide}px (desktop monitor-sized)`; }
-      else { detail = `short screen side ${shortSide}px (tablet/ambiguous range)`; }
-      return { name: "Screen profile", source: "screen.width/height", weight: 10, mobile, detail };
+    function signalWebSerial() {
+      const supported = typeof navigator !== "undefined" && "serial" in navigator;
+      return {
+        name: "Web Serial API",
+        source: "navigator.serial",
+        weight: 25,
+        mobile: supported ? false : null,
+        detail: supported
+          ? "navigator.serial present → desktop-only USB-serial API (Chrome/Edge/Opera desktop)"
+          : "navigator.serial absent → inconclusive (note: Android Chrome 138+ added Bluetooth-only serial, not real USB ports, so this stays a desktop tell either way)"
+      };
     }
 
-    function signalWebUsbVsTouch() {
-      const usbPresent = checkUsbApiPresent();
-      const touchy = (navigator.maxTouchPoints || 0) >= 1;
-      let mobile = null;
-      let detail;
-      if (!usbPresent && touchy) { mobile = true; detail = "no WebUSB + touch hardware → consistent with iOS (phone/tablet)"; }
-      else if (usbPresent && !touchy) { mobile = false; detail = "WebUSB present + no touch → consistent with desktop browser"; }
-      else if (usbPresent && touchy) { detail = "WebUSB present + touch → could be Android phone OR a touchscreen laptop, inconclusive alone"; }
-      else { detail = "no WebUSB + no touch → unusual combination, inconclusive"; }
-      return { name: "WebUSB support vs touch", source: "navigator.usb + maxTouchPoints", weight: 15, mobile, detail };
+    function signalPairedUsbPeripherals(devices) {
+      if (!devices || devices.length === 0) {
+        return {
+          name: "Paired USB peripheral class",
+          source: "navigator.usb.getDevices()",
+          weight: 20,
+          mobile: null,
+          detail: "no previously-authorized USB devices found (or WebUSB unavailable) → inconclusive"
+        };
+      }
+      const peripheralClasses = [3, 7, 8]; // HID, printer, mass storage
+      const hasPeripheral = devices.some(d => {
+        const ifaceClass = d.configurations?.[0]?.interfaces?.[0]?.alternates?.[0]?.interfaceClass;
+        return peripheralClasses.includes(d.deviceClass) || peripheralClasses.includes(ifaceClass);
+      });
+      return {
+        name: "Paired USB peripheral class",
+        source: "navigator.usb.getDevices()",
+        weight: 20,
+        mobile: hasPeripheral ? false : null,
+        detail: hasPeripheral
+          ? `${devices.length} paired USB device(s), at least one is HID/printer/mass-storage class → typical desktop peripheral setup`
+          : `${devices.length} paired USB device(s), none match typical desktop peripheral classes → inconclusive`
+      };
     }
 
-    function classifyDevice() {
+    function signalExtendedDisplay() {
+      const supported = typeof window.screen !== "undefined" && "isExtended" in window.screen;
+      if (!supported) {
+        return {
+          name: "Extended display (external monitor)",
+          source: "screen.isExtended",
+          weight: 15,
+          mobile: null,
+          detail: "Window Management API not available in this browser → inconclusive"
+        };
+      }
+      const extended = window.screen.isExtended;
+      return {
+        name: "Extended display (external monitor)",
+        source: "screen.isExtended",
+        weight: 15,
+        mobile: extended ? false : null,
+        detail: extended
+          ? "multiple screens detected → external monitor plugged into a port/dock (desktop/docked-laptop signal)"
+          : "single screen only → inconclusive (plenty of laptops/desktops are single-screen too)"
+      };
+    }
+
+    function signalWebUsbPresence() {
+      const supported = checkUsbApiPresent();
+      return {
+        name: "WebUSB API (context only)",
+        source: "navigator.usb",
+        weight: 10,
+        mobile: null,
+        detail: supported
+          ? "navigator.usb present — supported on both Android Chrome and desktop Chrome, doesn't separate them alone"
+          : "navigator.usb absent — could be iOS, Firefox, or Safari on any device, doesn't separate phone vs desktop alone"
+      };
+    }
+
+    async function classifyDevice() {
+      const devices = await getPairedUsbDevices();
       const signals = [
-        signalUserAgent(),
-        signalTouchPoints(),
-        signalPointerType(),
-        signalMotionSensors(),
-        signalScreenProfile(),
-        signalWebUsbVsTouch()
+        signalWebHID(),
+        signalWebSerial(),
+        signalPairedUsbPeripherals(devices),
+        signalExtendedDisplay(),
+        signalWebUsbPresence()
       ];
 
       let mobileScore = 0;
@@ -146,8 +178,8 @@
       return { signals, mobileScore, desktopScore, mobilePct, desktopPct, confidence, verdict };
     }
 
-    function renderDeviceType() {
-      const result = classifyDevice();
+    async function renderDeviceType() {
+      const result = await classifyDevice();
       const verdictBox = document.getElementById("verdictBox");
       const bars = document.getElementById("bars");
       const table = document.getElementById("signalTable");
@@ -155,7 +187,7 @@
       const labelMap = {
         smartphone: "📱 SMARTPHONE",
         desktop: "💻 LAPTOP / DESKTOP",
-        uncertain: "❓ UNCERTAIN (could be tablet, touchscreen laptop, or spoofed)"
+        uncertain: "❓ UNCERTAIN (no desktop-only port API detected — could still be a desktop on Firefox/Safari)"
       };
       const classMap = { smartphone: "smartphone", desktop: "desktop", uncertain: "uncertain" };
 
