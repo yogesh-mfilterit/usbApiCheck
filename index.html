@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>USB API Check</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .ok { color: green; }
+    .bad { color: red; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>USB API Check</h1>
+  <p id="status">Checking...</p>
+  <pre id="details"></pre>
+
+  <script>
+    function checkUsbApiPresent() {
+      return typeof navigator !== "undefined" && typeof navigator.usb !== "undefined";
+    }
+
+    async function runCheck() {
+      const statusEl = document.getElementById("status");
+      const detailsEl = document.getElementById("details");
+
+      const present = checkUsbApiPresent();
+
+      if (!present) {
+        statusEl.textContent = "USB API not present.";
+        statusEl.className = "bad";
+        detailsEl.textContent = JSON.stringify({
+          checkUsbApiPresent: false,
+          reason: "navigator.usb is not available in this browser/context"
+        }, null, 2);
+        return;
+      }
+
+      let devices = [];
+      try {
+        devices = await navigator.usb.getDevices();
+      } catch (e) {
+        devices = [];
+      }
+
+      statusEl.textContent = "USB API present.";
+      statusEl.className = "ok";
+
+      detailsEl.textContent = JSON.stringify({
+        checkUsbApiPresent: true,
+        deviceCount: devices.length,
+        devices: devices.map(d => ({
+          productName: d.productName || null,
+          manufacturerName: d.manufacturerName || null,
+          serialNumber: d.serialNumber || null,
+          vendorId: d.vendorId || null,
+          productId: d.productId || null
+        }))
+      }, null, 2);
+    }
+
+    runCheck();
+  </script>
+</body>
+</html>
