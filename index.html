@@ -3,64 +3,195 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>USB API Check</title>
+  <title>Device Type Detector</title>
   <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .ok { color: green; }
-    .bad { color: red; }
-    pre { background: #f5f5f5; padding: 12px; border-radius: 8px; }
+    body { font-family: Arial, sans-serif; padding: 24px; line-height: 1.5; max-width: 900px; margin: 0 auto; }
+    button { padding: 10px 14px; margin-bottom: 14px; cursor: pointer; }
+    .verdict { font-size: 22px; font-weight: bold; padding: 14px; border-radius: 10px; margin: 12px 0; }
+    .verdict.smartphone { background: #e8f5e9; color: #1a7f37; }
+    .verdict.desktop { background: #e3f2fd; color: #0b5fa5; }
+    .verdict.uncertain { background: #fff3e0; color: #b26a00; }
+    .bar-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+    .bar-label { width: 140px; font-size: 13px; }
+    .bar-track { flex: 1; background: #eee; border-radius: 6px; height: 14px; overflow: hidden; }
+    .bar-fill { height: 100%; }
+    .bar-fill.mobile { background: #1a7f37; }
+    .bar-fill.desktop { background: #0b5fa5; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 10px; }
+    td, th { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+    th { background: #f6f8fa; }
   </style>
 </head>
 <body>
-  <h1>USB API Check</h1>
-  <p id="status">Checking...</p>
-  <pre id="details"></pre>
+  <h1>Device Type Detector (Smartphone vs Laptop/Desktop)</h1>
+  <p style="font-size:13px;color:#555;">
+    No single signal proves device type — a phone can fake desktop mode and a desktop
+    browser can spoof its user agent. This combines several independent signals
+    (touch hardware, pointer precision, motion sensors, screen profile, and the
+    fact that iOS ships zero WebUSB support while Android/desktop Chrome do) and
+    scores them together for a confidence-rated verdict instead of a single guess.
+  </p>
+  <button id="detectBtn">Detect device type</button>
+  <div id="verdictBox"></div>
+  <div id="bars"></div>
+  <table id="signalTable"></table>
 
   <script>
     function checkUsbApiPresent() {
       return typeof navigator !== "undefined" && typeof navigator.usb !== "undefined";
     }
 
-    async function runCheck() {
-      const statusEl = document.getElementById("status");
-      const detailsEl = document.getElementById("details");
-
-      const present = checkUsbApiPresent();
-
-      if (!present) {
-        statusEl.textContent = "USB API not present.";
-        statusEl.className = "bad";
-        detailsEl.textContent = JSON.stringify({
-          checkUsbApiPresent: false,
-          reason: "navigator.usb is not available in this browser/context"
-        }, null, 2);
-        return;
+    function signalUserAgent() {
+      if (navigator.userAgentData && typeof navigator.userAgentData.mobile === "boolean") {
+        return {
+          name: "User-Agent Data API",
+          source: "navigator.userAgentData.mobile",
+          weight: 40,
+          mobile: navigator.userAgentData.mobile,
+          detail: `mobile=${navigator.userAgentData.mobile}, platform=${navigator.userAgentData.platform}`
+        };
       }
-
-      let devices = [];
-      try {
-        devices = await navigator.usb.getDevices();
-      } catch (e) {
-        devices = [];
-      }
-
-      statusEl.textContent = "USB API present.";
-      statusEl.className = "ok";
-
-      detailsEl.textContent = JSON.stringify({
-        checkUsbApiPresent: true,
-        deviceCount: devices.length,
-        devices: devices.map(d => ({
-          productName: d.productName || null,
-          manufacturerName: d.manufacturerName || null,
-          serialNumber: d.serialNumber || null,
-          vendorId: d.vendorId || null,
-          productId: d.productId || null
-        }))
-      }, null, 2);
+      const ua = navigator.userAgent || "";
+      const mobileRe = /Android|iPhone|iPod|Mobile|Windows Phone/i;
+      const tabletRe = /iPad|Tablet/i;
+      const desktopRe = /Windows NT|Macintosh|X11; Linux/i;
+      let mobile = null;
+      let detail = "no clear match";
+      if (mobileRe.test(ua) && !tabletRe.test(ua)) { mobile = true; detail = "UA matches phone pattern"; }
+      else if (desktopRe.test(ua)) { mobile = false; detail = "UA matches desktop OS pattern"; }
+      return { name: "User-Agent string", source: "navigator.userAgent", weight: 25, mobile, detail };
     }
 
-    runCheck();
+    function signalTouchPoints() {
+      const points = navigator.maxTouchPoints || 0;
+      const mobile = points >= 1;
+      return { name: "Touch points", source: "navigator.maxTouchPoints", weight: 15, mobile, detail: `maxTouchPoints=${points}` };
+    }
+
+    function signalPointerType() {
+      const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+      const anyFine = window.matchMedia && window.matchMedia("(any-pointer: fine)").matches;
+      let mobile = null;
+      let detail;
+      if (coarse && !anyFine) { mobile = true; detail = "primary pointer coarse, no fine pointer available (no mouse)"; }
+      else if (anyFine) { mobile = false; detail = "fine pointer available (mouse/trackpad present)"; }
+      else { detail = "ambiguous pointer profile"; }
+      return { name: "Pointer precision", source: "matchMedia(pointer)", weight: 10, mobile, detail };
+    }
+
+    function signalMotionSensors() {
+      const has = typeof DeviceOrientationEvent !== "undefined" && typeof DeviceMotionEvent !== "undefined";
+      return {
+        name: "Motion sensors",
+        source: "DeviceOrientationEvent / DeviceMotionEvent",
+        weight: has ? 10 : 5,
+        mobile: has,
+        detail: has ? "accelerometer/gyroscope events supported (typical of handheld hardware)" : "not supported (typical of non-handheld hardware)"
+      };
+    }
+
+    function signalScreenProfile() {
+      const shortSide = Math.min(window.screen.width, window.screen.height);
+      let mobile = null;
+      let detail;
+      if (shortSide <= 500) { mobile = true; detail = `short screen side ${shortSide}px (phone-sized)`; }
+      else if (shortSide >= 900) { mobile = false; detail = `short screen side ${shortSide}px (desktop monitor-sized)`; }
+      else { detail = `short screen side ${shortSide}px (tablet/ambiguous range)`; }
+      return { name: "Screen profile", source: "screen.width/height", weight: 10, mobile, detail };
+    }
+
+    function signalWebUsbVsTouch() {
+      const usbPresent = checkUsbApiPresent();
+      const touchy = (navigator.maxTouchPoints || 0) >= 1;
+      let mobile = null;
+      let detail;
+      if (!usbPresent && touchy) { mobile = true; detail = "no WebUSB + touch hardware → consistent with iOS (phone/tablet)"; }
+      else if (usbPresent && !touchy) { mobile = false; detail = "WebUSB present + no touch → consistent with desktop browser"; }
+      else if (usbPresent && touchy) { detail = "WebUSB present + touch → could be Android phone OR a touchscreen laptop, inconclusive alone"; }
+      else { detail = "no WebUSB + no touch → unusual combination, inconclusive"; }
+      return { name: "WebUSB support vs touch", source: "navigator.usb + maxTouchPoints", weight: 15, mobile, detail };
+    }
+
+    function classifyDevice() {
+      const signals = [
+        signalUserAgent(),
+        signalTouchPoints(),
+        signalPointerType(),
+        signalMotionSensors(),
+        signalScreenProfile(),
+        signalWebUsbVsTouch()
+      ];
+
+      let mobileScore = 0;
+      let desktopScore = 0;
+      let possibleWeight = 0;
+
+      signals.forEach(s => {
+        possibleWeight += s.weight;
+        if (s.mobile === true) mobileScore += s.weight;
+        else if (s.mobile === false) desktopScore += s.weight;
+      });
+
+      const decided = mobileScore + desktopScore;
+      const mobilePct = decided > 0 ? Math.round((mobileScore / decided) * 100) : 0;
+      const desktopPct = decided > 0 ? Math.round((desktopScore / decided) * 100) : 0;
+      const confidence = decided > 0 ? Math.round((decided / possibleWeight) * 100) : 0;
+
+      let verdict = "uncertain";
+      if (decided > 0) {
+        if (mobilePct >= 70) verdict = "smartphone";
+        else if (desktopPct >= 70) verdict = "desktop";
+      }
+
+      return { signals, mobileScore, desktopScore, mobilePct, desktopPct, confidence, verdict };
+    }
+
+    function renderDeviceType() {
+      const result = classifyDevice();
+      const verdictBox = document.getElementById("verdictBox");
+      const bars = document.getElementById("bars");
+      const table = document.getElementById("signalTable");
+
+      const labelMap = {
+        smartphone: "📱 SMARTPHONE",
+        desktop: "💻 LAPTOP / DESKTOP",
+        uncertain: "❓ UNCERTAIN (could be tablet, touchscreen laptop, or spoofed)"
+      };
+      const classMap = { smartphone: "smartphone", desktop: "desktop", uncertain: "uncertain" };
+
+      verdictBox.innerHTML = `<div class="verdict ${classMap[result.verdict]}">
+        ${labelMap[result.verdict]} — confidence ${result.confidence}%
+      </div>`;
+
+      bars.innerHTML = `
+        <div class="bar-row">
+          <div class="bar-label">Mobile signal</div>
+          <div class="bar-track"><div class="bar-fill mobile" style="width:${result.mobilePct}%"></div></div>
+          <div>${result.mobilePct}%</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label">Desktop signal</div>
+          <div class="bar-track"><div class="bar-fill desktop" style="width:${result.desktopPct}%"></div></div>
+          <div>${result.desktopPct}%</div>
+        </div>
+      `;
+
+      table.innerHTML = `
+        <tr><th>Signal</th><th>Source</th><th>Weight</th><th>Points to</th><th>Detail</th></tr>
+        ${result.signals.map(s => `
+          <tr>
+            <td>${s.name}</td>
+            <td><code>${s.source}</code></td>
+            <td>${s.weight}</td>
+            <td>${s.mobile === true ? "📱 mobile" : s.mobile === false ? "💻 desktop" : "— inconclusive"}</td>
+            <td>${s.detail}</td>
+          </tr>
+        `).join("")}
+      `;
+    }
+
+    document.getElementById("detectBtn").addEventListener("click", renderDeviceType);
+    renderDeviceType();
   </script>
 </body>
 </html>
