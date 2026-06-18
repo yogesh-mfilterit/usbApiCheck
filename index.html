@@ -9,7 +9,6 @@
     button { padding: 12px 20px; margin: 10px 0; cursor: pointer; font-size: 16px; }
     .verdict { font-size: 24px; font-weight: bold; padding: 18px; border-radius: 12px; margin: 15px 0; text-align: center; }
     .verdict.desktop { background: #e3f2fd; color: #0b5fa5; }
-    .verdict.mobile { background: #e8f5e9; color: #1a7f37; }
     .verdict.uncertain { background: #fff3e0; color: #b26a00; }
     .bar-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
     .bar-label { width: 160px; font-size: 14px; }
@@ -19,12 +18,13 @@
     table { border-collapse: collapse; width: 100%; margin-top: 15px; font-size: 14px; }
     td, th { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
     th { background: #f6f8fa; }
+    .note { font-size: 13px; color: #888; margin-top: 6px; }
   </style>
 </head>
 <body>
   <h1>Device Type Detector — Port Signals Only</h1>
   <button id="detectBtn">🔍 Detect Device Type</button>
-  
+
   <div id="verdictBox"></div>
   <div id="bars"></div>
   <table id="signalTable"></table>
@@ -35,48 +35,62 @@
       const hasWebSerial = "serial" in navigator;
       const hasWebUSB = "usb" in navigator;
 
+      // Only signals that can actually PROVE desktop count toward the score.
+      // WebUSB presence does NOT go in here: Android Chrome and desktop Chrome
+      // both expose it, so it can't tell them apart. Giving it partial credit
+      // (the old bug) silently biased every Chromium phone toward "Desktop".
       let desktopScore = 0;
-      let totalWeight = 0;
+      let decisiveWeight = 0;
 
-      // WebHID - Strong desktop signal
-      totalWeight += 25;
-      if (hasWebHID) desktopScore += 25;
+      decisiveWeight += 30;
+      if (hasWebHID) desktopScore += 30;
 
-      // Web Serial - Strong desktop signal
-      totalWeight += 25;
-      if (hasWebSerial) desktopScore += 25;
+      decisiveWeight += 30;
+      if (hasWebSerial) desktopScore += 30;
 
-      // Paired USB Devices
-      let hasPairedDevices = false;
+      // Paired USB devices — only count it if at least one paired device is a
+      // class typically used by external peripherals (HID/printer/mass storage).
+      // Counting ANY paired device was too loose: a phone with one paired USB
+      // flash drive would have wrongly scored as desktop evidence.
+      let hasPeripheral = false;
+      let pairedCount = 0;
       if (hasWebUSB) {
         try {
           const devices = await navigator.usb.getDevices();
-          hasPairedDevices = devices.length > 0;
+          pairedCount = devices.length;
+          const peripheralClasses = [3, 7, 8]; // HID, printer, mass storage
+          hasPeripheral = devices.some(d => {
+            const ifaceClass = d.configurations?.[0]?.interfaces?.[0]?.alternates?.[0]?.interfaceClass;
+            return peripheralClasses.includes(d.deviceClass) || peripheralClasses.includes(ifaceClass);
+          });
         } catch (e) {}
       }
-      totalWeight += 20;
-      if (hasPairedDevices) desktopScore += 20;
+      decisiveWeight += 15;
+      if (hasPeripheral) desktopScore += 15;
 
-      // Extended Display (External Monitor)
+      // External monitor
       const hasExtended = typeof screen !== "undefined" && "isExtended" in screen && screen.isExtended;
-      totalWeight += 15;
+      decisiveWeight += 15;
       if (hasExtended) desktopScore += 15;
 
-      // WebUSB presence (neutral)
-      totalWeight += 10;
-      if (hasWebUSB) desktopScore += 5;   // small bonus
+      const desktopPct = decisiveWeight > 0 ? Math.round((desktopScore / decisiveWeight) * 100) : 0;
 
-      const desktopPct = Math.round((desktopScore / totalWeight) * 100);
+      // Three states, not two. No port signal here is mobile-exclusive, so the
+      // detector is only allowed to confidently say "Desktop". Anything below
+      // threshold is "Uncertain" — NOT "likely mobile", since a Firefox/Safari
+      // desktop browser also fails these checks and isn't a phone.
+      let verdict = "uncertain";
+      if (desktopPct >= 60) verdict = "desktop";
 
       return {
         desktopPct,
-        isDesktop: desktopPct > 50,
+        verdict,
         signals: [
-          { name: "WebHID API", weight: 25, result: hasWebHID ? "Desktop" : "—" },
-          { name: "Web Serial API", weight: 25, result: hasWebSerial ? "Desktop" : "—" },
-          { name: "Paired USB Devices", weight: 20, result: hasPairedDevices ? "Desktop" : "—" },
-          { name: "External Monitor", weight: 15, result: hasExtended ? "Desktop" : "—" },
-          { name: "WebUSB Support", weight: 10, result: hasWebUSB ? "Neutral" : "—" }
+          { name: "WebHID API", weight: 30, result: hasWebHID ? "💻 Desktop" : "— inconclusive" },
+          { name: "Web Serial API", weight: 30, result: hasWebSerial ? "💻 Desktop" : "— inconclusive" },
+          { name: "Paired USB peripheral class", weight: 15, result: hasPeripheral ? `💻 Desktop (${pairedCount} paired)` : "— inconclusive" },
+          { name: "External Monitor", weight: 15, result: hasExtended ? "💻 Desktop" : "— inconclusive" },
+          { name: "WebUSB Support (context only)", weight: 0, result: hasWebUSB ? "Present — Android Chrome has this too, no score given" : "Absent — could be iOS, Firefox, or Safari, no score given" }
         ]
       };
     }
@@ -87,21 +101,20 @@
         const bars = document.getElementById("bars");
         const table = document.getElementById("signalTable");
 
-        if (result.isDesktop) {
+        if (result.verdict === "desktop") {
           verdictBox.innerHTML = `
             <div class="verdict desktop">
               ✅ Yes, this is Desktop / Laptop<br>
-              <small>Confidence: ${result.desktopPct}%</small>
+              <small>Desktop Signal: ${result.desktopPct}%</small>
             </div>`;
         } else {
           verdictBox.innerHTML = `
-            <div class="verdict mobile">
-              📱 Likely Mobile Device or Restricted Browser<br>
-              <small>Desktop signal: ${result.desktopPct}%</small>
+            <div class="verdict uncertain">
+              ❓ Uncertain<br>
+              <small>Desktop Signal: ${result.desktopPct}% — no desktop-only API detected. Could be mobile, or a Firefox/Safari desktop.</small>
             </div>`;
         }
 
-        // Progress Bar
         bars.innerHTML = `
           <div class="bar-row">
             <div class="bar-label">Desktop Signal</div>
@@ -112,7 +125,6 @@
           </div>
         `;
 
-        // Signal Table
         table.innerHTML = `
           <tr><th>Signal</th><th>Weight</th><th>Result</th></tr>
           ${result.signals.map(s => `
