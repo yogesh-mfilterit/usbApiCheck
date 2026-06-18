@@ -42,7 +42,15 @@
   <div id="bars"></div>
   <table id="signalTable"></table>
 
+  <h2 style="margin-top:32px;border-top:1px solid #ddd;padding-top:16px;">Collected Detections (this session)</h2>
+  <div>
+    <button id="exportBtn">Export collected data (JSON)</button>
+    <button id="clearBtn">Clear history</button>
+  </div>
+  <table id="historyTable"></table>
+
   <script>
+    const collected = [];
     function checkUsbApiPresent() {
       return typeof navigator !== "undefined" && typeof navigator.usb !== "undefined";
     }
@@ -178,8 +186,61 @@
       return { signals, mobileScore, desktopScore, mobilePct, desktopPct, confidence, verdict };
     }
 
+    function renderHistory() {
+      const table = document.getElementById("historyTable");
+      if (collected.length === 0) {
+        table.innerHTML = "<tr><td style='padding:8px;color:#888;'>No detections collected yet.</td></tr>";
+        return;
+      }
+      table.innerHTML = `
+        <tr><th>#</th><th>Time</th><th>Verdict</th><th>Confidence</th><th>Mobile %</th><th>Desktop %</th></tr>
+        ${collected.map((c, i) => `
+          <tr>
+            <td>${i + 1}</td>
+            <td>${new Date(c.timestamp).toLocaleTimeString()}</td>
+            <td>${c.verdict}</td>
+            <td>${c.confidence}%</td>
+            <td>${c.mobilePct}%</td>
+            <td>${c.desktopPct}%</td>
+          </tr>
+        `).join("")}
+      `;
+    }
+
+    function exportHistory() {
+      if (collected.length === 0) { alert("Nothing collected yet — click Detect device type first."); return; }
+      const blob = new Blob([JSON.stringify(collected, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `device-type-detections-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function clearHistory() {
+      collected.length = 0;
+      renderHistory();
+    }
+
+    document.getElementById("exportBtn").addEventListener("click", exportHistory);
+    document.getElementById("clearBtn").addEventListener("click", clearHistory);
+
     async function renderDeviceType() {
       const result = await classifyDevice();
+
+      collected.push({
+        timestamp: Date.now(),
+        verdict: result.verdict,
+        confidence: result.confidence,
+        mobilePct: result.mobilePct,
+        desktopPct: result.desktopPct,
+        signals: result.signals
+      });
+      renderHistory();
+
       const verdictBox = document.getElementById("verdictBox");
       const bars = document.getElementById("bars");
       const table = document.getElementById("signalTable");
@@ -223,7 +284,7 @@
     }
 
     document.getElementById("detectBtn").addEventListener("click", renderDeviceType);
-    renderDeviceType();
+    renderHistory();
   </script>
 </body>
 </html>
